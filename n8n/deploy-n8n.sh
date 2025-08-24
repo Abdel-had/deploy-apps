@@ -1,103 +1,100 @@
 #!/bin/bash
 set -euo pipefail
 
-# === Params ===
-PROJECT_DIR="${PROJECT_DIR:-/opt/n8n-traefik}"
-SSH_PORT="${SSH_PORT:-2222}"
-ADMIN_USER="${ADMIN_USER:-aha_admin}"
-ALLOW_IPS=("88.122.144.169" "185.22.198.1")
+# --- Variables ---
+DOMAIN_NAME="chamssan8n.online"
+GENERIC_TIMEZONE="Europe/Berlin"
+SSL_EMAIL="chamssane.attoumani@live.fr"
+SSH_USER="aha_admin"
+SSH_PORT="2222"
+ALLOWED_IPS=("88.122.144.169" "185.22.198.1")
 
-# === Helpers ===
-require_root(){ [[ $EUID -eq 0 ]] || { echo "Exécute en root"; exit 1; }; }
-have(){ command -v "$1" >/dev/null 2>&1; }
+# --- Vérifier root ---
+if [ "$(id -u)" -ne 0 ]; then
+  echo "Ce script doit être lancé en root"
+  exit 1
+fi
 
-# === APT base + nettoyage doublons ===
-apt_prep(){
-  if [[ -f /etc/apt/sources.list.d/ubuntu-mirrors.list ]]; then
-    sort -u /etc/apt/sources.list.d/ubuntu-mirrors.list -o /etc/apt/sources.list.d/ubuntu-mirrors.list || true
+echo "[1/7] Nettoyage sources apt"
+if [ -f /etc/apt/sources.list.d/ubuntu-mirrors.list ]; then
+  echo "$(sort -u /etc/apt/sources.list.d/ubuntu-mirrors.list)" > /etc/apt/sources.list.d/ubuntu-mirrors.list
+fi
+
+echo "[2/7] Installation paquets de base"
+apt-get update -qq
+apt-get install -y ca-certificates curl gnupg ufw fail2ban
+
+echo "[3/7] Docker & Compose"
+if ! command -v docker >/dev/null 2>&1; then
+  install -m 0755 -d /etc/apt/keyrings
+  curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+  echo \
+    "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \
+    $(. /etc/os-release && echo "$VERSION_CODENAME") stable" > /etc/apt/sources.list.d/docker.list
+  apt-get update -qq
+  apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+fi
+
+echo "[4/7] Création utilisateur ${SSH_USER}"
+if ! id -u "$SSH_USER" >/dev/null 2>&1; then
+  adduser --disabled-password --gecos "" "$SSH_USER"
+  usermod -aG sudo,docker "$SSH_USER"
+  mkdir -p /home/$SSH_USER/.ssh
+  if [ -d /root/.ssh ]; then
+    cp /root/.ssh/authorized_keys /home/$SSH_USER/.ssh/ 2>/dev/null || true
   fi
-  apt-get update -y
-  apt-get install -y ca-certificates curl ufw jq gpg lsb-release
-}
+  chown -R $SSH_USER:$SSH_USER /home/$SSH_USER/.ssh
+  chmod 700 /home/$SSH_USER/.ssh
+  chmod 600 /home/$SSH_USER/.ssh/authorized_keys
+fi
 
-# === Docker/Compose si absents ===
-install_docker_if_needed(){
-  if ! have docker; then
-    install -m 0755 -d /etc/apt/keyrings
-    curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
-    chmod a+r /etc/apt/keyrings/docker.gpg
-    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(
-      . /etc/os-release; echo ${UBUNTU_CODENAME:-$(lsb_release -cs)}
-    ) stable" > /etc/apt/sources.list.d/docker.list
-    apt-get update -y
-    apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-    systemctl enable --now docker
-  fi
-  have docker && docker compose version >/dev/null 2>&1 || apt-get install -y docker-compose-plugin
-}
+echo "[5/7] Sécurisation SSH & UFW"
+cfg="/etc/ssh/sshd_config"
+sed -i -E \
+  -e "s@^[# ]*Port .*@Port ${SSH_PORT}@g" \
+  -e "s@^[# ]*PermitRootLogin .*@PermitRootLogin no@g" \
+  -e "s@^[# ]*PasswordAuthentication .*@PasswordAuthentication no@g" \
+  "$cfg"
 
-# === Utilisateur admin + migration des clés ===
-ensure_admin_user_and_keys(){
-  id -u "$ADMIN_USER" >/dev/null 2>&1 || adduser --disabled-password --gecos "" "$ADMIN_USER"
-  usermod -aG sudo "$ADMIN_USER" || true
-  usermod -aG docker "$ADMIN_USER" || true
-  mkdir -p /home/"$ADMIN_USER"/.ssh
-  chmod 700 /home/"$ADMIN_USER"/.ssh
-  touch /home/"$ADMIN_USER"/.ssh/authorized_keys
-  # Migrer les clés de root si présentes
-  if [[ -s /root/.ssh/authorized_keys ]]; then
-    cp /root/.ssh/authorized_keys /home/"$ADMIN_USER"/.ssh/authorized_keys
-  fi
-  chown -R "$ADMIN_USER":"$ADMIN_USER" /home/"$ADMIN_USER"/.ssh
-  chmod 600 /home/"$ADMIN_USER"/.ssh/authorized_keys
-}
+ufw --force reset
+ufw default deny incoming
+ufw default allow outgoing
+for ip in "${ALLOWED_IPS[@]}"; do
+  ufw allow from $ip to any port $SSH_PORT proto tcp
+done
+ufw allow 80/tcp
+ufw allow 443/tcp
+ufw --force enable
 
-# === SSH + UFW (clé uniquement, IPs restreintes) ===
-lockdown_ssh_ufw(){
-  local cfg="/etc/ssh/sshd_config"
-  [[ -f ${cfg}.bak ]] || cp -a "$cfg" "${cfg}.bak"
+systemctl reload sshd || systemctl restart ssh
 
-  sed -i -E \
-    -e "s@^[# ]*Port .*@Port ${SSH_PORT}@g" \
-    -e "s@^[# ]*PermitRootLogin .*@PermitRootLogin no@g" \
-    -e "s@^[# ]*PasswordAuthentication .*@PasswordAuthentication no@g" \
-    -e "s@^[# ]*KbdInteractiveAuthentication .*@KbdInteractiveAuthentication no@g" \
-    "$cfg"
+echo "[6/7] Configuration Fail2Ban"
+cat >/etc/fail2ban/jail.local <<EOF
+[sshd]
+enabled = true
+port    = ${SSH_PORT}
+filter  = sshd
+logpath = /var/log/auth.log
+maxretry = 4
+EOF
+systemctl enable --now fail2ban
 
-  if grep -qE "^[# ]*AllowUsers " "$cfg"; then
-    sed -i -E "s@^[# ]*AllowUsers .*@AllowUsers ${ADMIN_USER}@g" "$cfg"
-  else
-    echo "AllowUsers ${ADMIN_USER}" >> "$cfg"
-  fi
+echo "[7/7] Déploiement n8n + Traefik"
+mkdir -p /opt/n8n-traefik
+cd /opt/n8n-traefik
 
-  ufw default deny incoming || true
-  ufw default allow outgoing || true
-  ufw delete allow "${SSH_PORT}"/tcp >/dev/null 2>&1 || true
-  ufw delete allow 22/tcp >/dev/null 2>&1 || true
-  for ip in "${ALLOW_IPS[@]}"; do
-    ufw allow from "$ip" to any port "${SSH_PORT}" proto tcp || true
-  done
-  ufw allow 80/tcp || true
-  ufw allow 443/tcp || true
-  yes | ufw enable >/dev/null 2>&1 || true
+cat >.env <<EOF
+DOMAIN_NAME=${DOMAIN_NAME}
+GENERIC_TIMEZONE=${GENERIC_TIMEZONE}
+SSL_EMAIL=${SSL_EMAIL}
+EOF
 
-  sshd -t
-  systemctl daemon-reload
-  systemctl is-active ssh.socket >/dev/null 2>&1 && systemctl restart ssh.socket || systemctl restart ssh
-}
-
-# === Fichiers docker ===
-write_files(){
-  mkdir -p "${PROJECT_DIR}"
-  cd "${PROJECT_DIR}"
-
-  cat > docker-compose.yml <<'YAML'
+cat >docker-compose.yml <<'EOF'
 services:
   traefik:
-    image: "traefik"
+    image: "traefik:v3.1"
     restart: always
     command:
-      - "--api=true"
       - "--providers.docker=true"
       - "--providers.docker.exposedbydefault=false"
       - "--entrypoints.web.address=:80"
@@ -105,7 +102,7 @@ services:
       - "--entrypoints.web.http.redirections.entrypoint.scheme=https"
       - "--entrypoints.websecure.address=:443"
       - "--certificatesresolvers.mytlschallenge.acme.tlschallenge=true"
-      - "--certificatesresolvers.mytlschallenge.acme.email=${SSL_EMAIL}"
+      - "--certificatesresolvers.mytlschallenge.acme.email=\${SSL_EMAIL}"
       - "--certificatesresolvers.mytlschallenge.acme.storage=/letsencrypt/acme.json"
     ports:
       - "80:80"
@@ -121,26 +118,34 @@ services:
       - "127.0.0.1:5678:5678"
     labels:
       - traefik.enable=true
-      - traefik.http.routers.n8n.rule=Host(`${DOMAIN_NAME}`)
+      - traefik.http.routers.n8n.rule=Host(\${DOMAIN_NAME})
+      - traefik.http.routers.n8n.entrypoints=websecure
       - traefik.http.routers.n8n.tls=true
-      - traefik.http.routers.n8n.entrypoints=web,websecure
       - traefik.http.routers.n8n.tls.certresolver=mytlschallenge
-      - traefik.http.middlewares.n8n.headers.SSLRedirect=true
-      - traefik.http.middlewares.n8n.headers.STSSeconds=315360000
-      - traefik.http.middlewares.n8n.headers.browserXSSFilter=true
-      - traefik.http.middlewares.n8n.headers.contentTypeNosniff=true
-      - traefik.http.middlewares.n8n.headers.forceSTSHeader=true
-      - traefik.http.middlewares.n8n.headers.SSLHost=${DOMAIN_NAME}
-      - traefik.http.middlewares.n8n.headers.STSIncludeSubdomains=true
-      - traefik.http.middlewares.n8n.headers.STSPreload=true
-      - traefik.http.routers.n8n.middlewares=n8n@docker
+      # Headers sécurisés
+      - traefik.http.middlewares.n8n-headers.headers.SSLRedirect=true
+      - traefik.http.middlewares.n8n-headers.headers.STSSeconds=315360000
+      - traefik.http.middlewares.n8n-headers.headers.browserXSSFilter=true
+      - traefik.http.middlewares.n8n-headers.headers.contentTypeNosniff=true
+      - traefik.http.middlewares.n8n-headers.headers.forceSTSHeader=true
+      - traefik.http.middlewares.n8n-headers.headers.SSLHost=\${DOMAIN_NAME}
+      - traefik.http.middlewares.n8n-headers.headers.STSIncludeSubdomains=true
+      - traefik.http.middlewares.n8n-headers.headers.STSPreload=true
+      - traefik.http.middlewares.n8n-headers.headers.referrerPolicy=no-referrer
+      # Limitation requêtes
+      - traefik.http.middlewares.n8n-rate.ratelimit.average=60
+      - traefik.http.middlewares.n8n-rate.ratelimit.burst=120
+      - traefik.http.middlewares.n8n-body.buffering.maxRequestBodyBytes=10485760
+      # Restriction IP front web
+      - traefik.http.middlewares.n8n-ip.ipwhitelist.sourcerange=88.122.144.169,185.22.198.1
+      - traefik.http.routers.n8n.middlewares=n8n-headers@docker,n8n-rate@docker,n8n-body@docker,n8n-ip@docker
     environment:
-      - N8N_HOST=${DOMAIN_NAME}
+      - N8N_HOST=\${DOMAIN_NAME}
       - N8N_PORT=5678
       - N8N_PROTOCOL=https
       - NODE_ENV=production
-      - WEBHOOK_URL=https://${DOMAIN_NAME}/
-      - GENERIC_TIMEZONE=${GENERIC_TIMEZONE}
+      - WEBHOOK_URL=https://\${DOMAIN_NAME}/
+      - GENERIC_TIMEZONE=\${GENERIC_TIMEZONE}
     volumes:
       - n8n_data:/home/node/.n8n
       - /local-files:/files
@@ -150,45 +155,14 @@ volumes:
     external: true
   n8n_data:
     external: true
-YAML
+EOF
 
-  cat > .env <<'ENV'
-# The top level domain to serve from
-DOMAIN_NAME=chamssan8n.online
+docker volume create traefik_data
+docker run --rm -v traefik_data:/v alpine sh -c "touch /v/acme.json && chmod 600 /v/acme.json"
+docker volume create n8n_data
 
-# The subdomain to serve from
-# SUBDOMAIN=n8n
+docker compose up -d
 
-# DOMAIN_NAME and SUBDOMAIN combined decide where n8n will be reachable from
-# above example would result in: https://n8n.srv972555.hstgr.cloud
-
-# Optional timezone to set which gets used by Cron-Node by default
-# If not set New York time will be used
-GENERIC_TIMEZONE=Europe/Berlin
-
-# The email address to use for the SSL certificate creation
-SSL_EMAIL=chamssane.attoumani@live.fr
-ENV
-}
-
-# === Volumes + stack ===
-deploy_stack(){
-  cd "${PROJECT_DIR}"
-  docker volume inspect traefik_data >/dev/null 2>&1 || docker volume create traefik_data
-  docker run --rm -v traefik_data:/v alpine:latest sh -c "touch /v/acme.json && chmod 600 /v/acme.json"
-  docker volume inspect n8n_data >/dev/null 2>&1 || docker volume create n8n_data
-  docker compose pull
-  docker compose up -d
-}
-
-# === Main ===
-require_root
-apt_prep
-install_docker_if_needed
-ensure_admin_user_and_keys
-lockdown_ssh_ufw
-write_files
-deploy_stack
-
-echo "OK. SSH ${SSH_PORT} par clé pour ${ADMIN_USER}, IPs autorisées: ${ALLOW_IPS[*]}."
-echo "Fichiers: ${PROJECT_DIR}. Lance: cd ${PROJECT_DIR} && docker compose logs -f traefik"
+echo "=== Déploiement terminé ==="
+echo "→ SSH accessible uniquement via ${SSH_USER}@<IP> port ${SSH_PORT}"
+echo "→ HTTPS: https://${DOMAIN_NAME}"
