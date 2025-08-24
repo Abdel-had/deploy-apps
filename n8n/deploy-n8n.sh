@@ -41,7 +41,7 @@ if ! id -u "$SSH_USER" >/dev/null 2>&1; then
   usermod -aG sudo,docker "$SSH_USER"
   mkdir -p /home/$SSH_USER/.ssh
   if [ -d /root/.ssh ]; then
-    cp /root/.ssh/authorized_keys /home/$SSH_USER/.ssh/ 2>/dev/null || true
+    cat /root/.ssh/authorized_keys >> /home/$SSH_USER/.ssh/ 2>/dev/null || true
   fi
   chown -R $SSH_USER:$SSH_USER /home/$SSH_USER/.ssh
   chmod 700 /home/$SSH_USER/.ssh
