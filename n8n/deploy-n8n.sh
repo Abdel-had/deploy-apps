@@ -29,12 +29,21 @@ apt-get install -y ca-certificates curl gnupg ufw fail2ban
 echo "[3/7] Docker & Compose"
 if ! command -v docker >/dev/null 2>&1; then
   install -m 0755 -d /etc/apt/keyrings
-  curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
-  echo \
-    "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \
-    $(. /etc/os-release && echo "$VERSION_CODENAME") stable" > /etc/apt/sources.list.d/docker.list
+  OS_ID=$( . /etc/os-release && echo "$ID" )
+  OS_CODENAME=$( . /etc/os-release && echo "${UBUNTU_CODENAME:-$VERSION_CODENAME}" )
+  BASE_URL="https://download.docker.com/linux"
+  case "$OS_ID" in
+    debian)   DOCKER_URL="$BASE_URL/debian";;
+    ubuntu)   DOCKER_URL="$BASE_URL/ubuntu";;
+    *) echo "OS non supporté: $OS_ID"; exit 1;;
+  esac
+  curl -fsSL "$DOCKER_URL/gpg" | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+  echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
+$DOCKER_URL $OS_CODENAME stable" > /etc/apt/sources.list.d/docker.list
+
   apt-get update -qq
   apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+  systemctl enable --now docker
 fi
 
 echo "[4/7] Création utilisateur ${SSH_USER}"
