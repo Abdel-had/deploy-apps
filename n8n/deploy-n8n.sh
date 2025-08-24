@@ -2,7 +2,9 @@
 set -euo pipefail
 
 # --- Variables ---
-DOMAIN_NAME="chamssan8n.online"
+ROOT_DOMAIN="chamssane.online"
+APP_SUBDOMAIN="n8n"
+FQDN="${APP_SUBDOMAIN}.${ROOT_DOMAIN}"
 GENERIC_TIMEZONE="Europe/Berlin"
 SSL_EMAIL="chamssane.attoumani@live.fr"
 SSH_USER="aha_admin"
@@ -40,12 +42,12 @@ if ! id -u "$SSH_USER" >/dev/null 2>&1; then
   adduser --disabled-password --gecos "" "$SSH_USER"
   usermod -aG sudo,docker "$SSH_USER"
   mkdir -p /home/$SSH_USER/.ssh
-  if [ -d /root/.ssh ]; then
-    cat /root/.ssh/authorized_keys >> /home/$SSH_USER/.ssh/ 2>/dev/null || true
+  if [ -f /root/.ssh/authorized_keys ]; then
+    cat /root/.ssh/authorized_keys >> /home/$SSH_USER/.ssh/authorized_keys
   fi
   chown -R $SSH_USER:$SSH_USER /home/$SSH_USER/.ssh
   chmod 700 /home/$SSH_USER/.ssh
-  chmod 600 /home/$SSH_USER/.ssh/authorized_keys
+  chmod 600 /home/$SSH_USER/.ssh/authorized_keys || true
 fi
 
 echo "[5/7] Sécurisation SSH & UFW"
@@ -60,7 +62,7 @@ ufw --force reset
 ufw default deny incoming
 ufw default allow outgoing
 for ip in "${ALLOWED_IPS[@]}"; do
-  ufw allow from $ip to any port $SSH_PORT proto tcp
+  ufw allow from "$ip" to any port "$SSH_PORT" proto tcp
 done
 ufw allow 80/tcp
 ufw allow 443/tcp
@@ -84,7 +86,9 @@ mkdir -p /opt/n8n-traefik
 cd /opt/n8n-traefik
 
 cat >.env <<EOF
-DOMAIN_NAME=${DOMAIN_NAME}
+ROOT_DOMAIN=${ROOT_DOMAIN}
+APP_SUBDOMAIN=${APP_SUBDOMAIN}
+FQDN=${FQDN}
 GENERIC_TIMEZONE=${GENERIC_TIMEZONE}
 SSL_EMAIL=${SSL_EMAIL}
 EOF
@@ -102,7 +106,7 @@ services:
       - "--entrypoints.web.http.redirections.entrypoint.scheme=https"
       - "--entrypoints.websecure.address=:443"
       - "--certificatesresolvers.mytlschallenge.acme.tlschallenge=true"
-      - "--certificatesresolvers.mytlschallenge.acme.email=\${SSL_EMAIL}"
+      - "--certificatesresolvers.mytlschallenge.acme.email=${SSL_EMAIL}"
       - "--certificatesresolvers.mytlschallenge.acme.storage=/letsencrypt/acme.json"
     ports:
       - "80:80"
@@ -118,7 +122,7 @@ services:
       - "127.0.0.1:5678:5678"
     labels:
       - traefik.enable=true
-      - traefik.http.routers.n8n.rule=Host(\${DOMAIN_NAME})
+      - traefik.http.routers.n8n.rule=Host(${FQDN})
       - traefik.http.routers.n8n.entrypoints=websecure
       - traefik.http.routers.n8n.tls=true
       - traefik.http.routers.n8n.tls.certresolver=mytlschallenge
@@ -128,7 +132,7 @@ services:
       - traefik.http.middlewares.n8n-headers.headers.browserXSSFilter=true
       - traefik.http.middlewares.n8n-headers.headers.contentTypeNosniff=true
       - traefik.http.middlewares.n8n-headers.headers.forceSTSHeader=true
-      - traefik.http.middlewares.n8n-headers.headers.SSLHost=\${DOMAIN_NAME}
+      - traefik.http.middlewares.n8n-headers.headers.SSLHost=${FQDN}
       - traefik.http.middlewares.n8n-headers.headers.STSIncludeSubdomains=true
       - traefik.http.middlewares.n8n-headers.headers.STSPreload=true
       - traefik.http.middlewares.n8n-headers.headers.referrerPolicy=no-referrer
@@ -140,12 +144,12 @@ services:
       - traefik.http.middlewares.n8n-ip.ipwhitelist.sourcerange=88.122.144.169,185.22.198.1
       - traefik.http.routers.n8n.middlewares=n8n-headers@docker,n8n-rate@docker,n8n-body@docker,n8n-ip@docker
     environment:
-      - N8N_HOST=\${DOMAIN_NAME}
+      - N8N_HOST=${FQDN}
       - N8N_PORT=5678
       - N8N_PROTOCOL=https
       - NODE_ENV=production
-      - WEBHOOK_URL=https://\${DOMAIN_NAME}/
-      - GENERIC_TIMEZONE=\${GENERIC_TIMEZONE}
+      - WEBHOOK_URL=https://${FQDN}/
+      - GENERIC_TIMEZONE=${GENERIC_TIMEZONE}
     volumes:
       - n8n_data:/home/node/.n8n
       - /local-files:/files
@@ -164,5 +168,5 @@ docker volume create n8n_data
 docker compose up -d
 
 echo "=== Déploiement terminé ==="
-echo "→ SSH accessible uniquement via ${SSH_USER}@<IP> port ${SSH_PORT}"
-echo "→ HTTPS: https://${DOMAIN_NAME}"
+echo "→ SSH: ${SSH_USER}@<IP> port ${SSH_PORT}"
+echo "→ HTTPS: https://${FQDN}"
