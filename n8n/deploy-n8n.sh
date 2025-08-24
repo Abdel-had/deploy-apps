@@ -36,54 +36,51 @@ install_docker_if_needed(){
   have docker && docker compose version >/dev/null 2>&1 || apt-get install -y docker-compose-plugin
 }
 
-# === Utilisateur admin ===
-ensure_admin_user(){
+# === Utilisateur admin + migration des clés ===
+ensure_admin_user_and_keys(){
   id -u "$ADMIN_USER" >/dev/null 2>&1 || adduser --disabled-password --gecos "" "$ADMIN_USER"
   usermod -aG sudo "$ADMIN_USER" || true
   usermod -aG docker "$ADMIN_USER" || true
   mkdir -p /home/"$ADMIN_USER"/.ssh
   chmod 700 /home/"$ADMIN_USER"/.ssh
   touch /home/"$ADMIN_USER"/.ssh/authorized_keys
-  chmod 600 /home/"$ADMIN_USER"/.ssh/authorized_keys
+  # Migrer les clés de root si présentes
+  if [[ -s /root/.ssh/authorized_keys ]]; then
+    cp /root/.ssh/authorized_keys /home/"$ADMIN_USER"/.ssh/authorized_keys
+  fi
   chown -R "$ADMIN_USER":"$ADMIN_USER" /home/"$ADMIN_USER"/.ssh
+  chmod 600 /home/"$ADMIN_USER"/.ssh/authorized_keys
 }
 
-# === SSH + UFW (idempotent) ===
+# === SSH + UFW (clé uniquement, IPs restreintes) ===
 lockdown_ssh_ufw(){
   local cfg="/etc/ssh/sshd_config"
   [[ -f ${cfg}.bak ]] || cp -a "$cfg" "${cfg}.bak"
 
-  # Port, root et mot de passe
   sed -i -E \
     -e "s@^[# ]*Port .*@Port ${SSH_PORT}@g" \
     -e "s@^[# ]*PermitRootLogin .*@PermitRootLogin no@g" \
     -e "s@^[# ]*PasswordAuthentication .*@PasswordAuthentication no@g" \
+    -e "s@^[# ]*KbdInteractiveAuthentication .*@KbdInteractiveAuthentication no@g" \
     "$cfg"
 
-  # AllowUsers
   if grep -qE "^[# ]*AllowUsers " "$cfg"; then
     sed -i -E "s@^[# ]*AllowUsers .*@AllowUsers ${ADMIN_USER}@g" "$cfg"
   else
     echo "AllowUsers ${ADMIN_USER}" >> "$cfg"
   fi
 
-  # UFW sans reset complet
   ufw default deny incoming || true
   ufw default allow outgoing || true
-  # Nettoyage règles SSH existantes
-  ufw deny "${SSH_PORT}"/tcp >/dev/null 2>&1 || true
   ufw delete allow "${SSH_PORT}"/tcp >/dev/null 2>&1 || true
   ufw delete allow 22/tcp >/dev/null 2>&1 || true
-  # Ajout règles IP sources autorisées
   for ip in "${ALLOW_IPS[@]}"; do
     ufw allow from "$ip" to any port "${SSH_PORT}" proto tcp || true
   done
-  # Web
   ufw allow 80/tcp || true
   ufw allow 443/tcp || true
   yes | ufw enable >/dev/null 2>&1 || true
 
-  # Valide et restart ssh
   sshd -t
   systemctl daemon-reload
   systemctl is-active ssh.socket >/dev/null 2>&1 && systemctl restart ssh.socket || systemctl restart ssh
@@ -94,7 +91,6 @@ write_files(){
   mkdir -p "${PROJECT_DIR}"
   cd "${PROJECT_DIR}"
 
-  # docker-compose.yml (exact demandé)
   cat > docker-compose.yml <<'YAML'
 services:
   traefik:
@@ -156,7 +152,6 @@ volumes:
     external: true
 YAML
 
-  # .env (exact demandé)
   cat > .env <<'ENV'
 # The top level domain to serve from
 DOMAIN_NAME=chamssan8n.online
@@ -176,7 +171,7 @@ SSL_EMAIL=chamssane.attoumani@live.fr
 ENV
 }
 
-# === Volumes + stack (idempotent) ===
+# === Volumes + stack ===
 deploy_stack(){
   cd "${PROJECT_DIR}"
   docker volume inspect traefik_data >/dev/null 2>&1 || docker volume create traefik_data
@@ -190,10 +185,10 @@ deploy_stack(){
 require_root
 apt_prep
 install_docker_if_needed
-ensure_admin_user
+ensure_admin_user_and_keys
 lockdown_ssh_ufw
 write_files
 deploy_stack
 
-echo "OK. Fichiers dans ${PROJECT_DIR}. SSH ${SSH_PORT} uniquement ${ADMIN_USER} depuis ${ALLOW_IPS[*]}."
-echo "Commande utile: cd ${PROJECT_DIR} && docker compose logs -f traefik"
+echo "OK. SSH ${SSH_PORT} par clé pour ${ADMIN_USER}, IPs autorisées: ${ALLOW_IPS[*]}."
+echo "Fichiers: ${PROJECT_DIR}. Lance: cd ${PROJECT_DIR} && docker compose logs -f traefik"
