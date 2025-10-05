@@ -3,8 +3,7 @@ set -euo pipefail
 
 # --- Variables ---
 ROOT_DOMAIN="chamssane.online"
-APP_SUBDOMAIN="n8n"
-FQDN="${APP_SUBDOMAIN}.${ROOT_DOMAIN}"
+FQDN="${ROOT_DOMAIN}"
 GENERIC_TIMEZONE="Europe/Berlin"
 SSL_EMAIL="chamssane.attoumani@live.fr"
 SSH_USER="aha_admin"
@@ -96,10 +95,10 @@ cd /opt/n8n-traefik
 
 cat >.env <<EOF
 ROOT_DOMAIN=${ROOT_DOMAIN}
-APP_SUBDOMAIN=${APP_SUBDOMAIN}
 FQDN=${FQDN}
 GENERIC_TIMEZONE=${GENERIC_TIMEZONE}
 SSL_EMAIL=${SSL_EMAIL}
+N8N_ENCRYPTION_KEY=$(openssl rand -hex 32)
 EOF
 
 cat >docker-compose.yml <<'EOF'
@@ -111,7 +110,7 @@ services:
       - "--providers.docker=true"
       - "--providers.docker.exposedbydefault=false"
       - "--entrypoints.web.address=:80"
-      - "--entrypoints.web.http.redirections.entryPoint.to=websecure"
+      - "--entrypoints.web.http.redirections.entrypoint.to=websecure"
       - "--entrypoints.web.http.redirections.entrypoint.scheme=https"
       - "--entrypoints.websecure.address=:443"
       - "--certificatesresolvers.mytlschallenge.acme.tlschallenge=true"
@@ -125,23 +124,23 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:ro
 
   n8n:
-    image: docker.n8n.io/n8nio/n8n
+    image: docker.n8n.io/n8nio/n8n:1.107.4-arm64
     restart: always
     ports:
       - "127.0.0.1:5678:5678"
     labels:
       - traefik.enable=true
-      - traefik.http.routers.n8n.rule=Host(${FQDN})
+      - traefik.http.routers.n8n.rule=Host(`${FQDN}`)
       - traefik.http.routers.n8n.entrypoints=websecure
       - traefik.http.routers.n8n.tls=true
       - traefik.http.routers.n8n.tls.certresolver=mytlschallenge
+      - traefik.http.routers.n8n.service=n8n
+      - traefik.http.services.n8n.loadbalancer.server.port=5678
       # Headers sécurisés
-      - traefik.http.middlewares.n8n-headers.headers.SSLRedirect=true
       - traefik.http.middlewares.n8n-headers.headers.STSSeconds=315360000
       - traefik.http.middlewares.n8n-headers.headers.browserXSSFilter=true
       - traefik.http.middlewares.n8n-headers.headers.contentTypeNosniff=true
       - traefik.http.middlewares.n8n-headers.headers.forceSTSHeader=true
-      - traefik.http.middlewares.n8n-headers.headers.SSLHost=${FQDN}
       - traefik.http.middlewares.n8n-headers.headers.STSIncludeSubdomains=true
       - traefik.http.middlewares.n8n-headers.headers.STSPreload=true
       - traefik.http.middlewares.n8n-headers.headers.referrerPolicy=no-referrer
@@ -150,9 +149,13 @@ services:
       - traefik.http.middlewares.n8n-rate.ratelimit.burst=120
       - traefik.http.middlewares.n8n-body.buffering.maxRequestBodyBytes=10485760
       # Restriction IP front web
-      - traefik.http.middlewares.n8n-ip.ipwhitelist.sourcerange=88.122.144.169,185.22.198.1
+      - traefik.http.middlewares.n8n-ip.ipallowlist.sourcerange=0.0.0.0/0,::/0
       - traefik.http.routers.n8n.middlewares=n8n-headers@docker,n8n-rate@docker,n8n-body@docker,n8n-ip@docker
     environment:
+      - N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS=true
+      - N8N_ENCRYPTION_KEY=<32+ chars aléatoires>
+      - DB_SQLITE_POOL_SIZE=1
+      - N8N_RUNNERS_ENABLED=true
       - N8N_HOST=${FQDN}
       - N8N_PORT=5678
       - N8N_PROTOCOL=https
