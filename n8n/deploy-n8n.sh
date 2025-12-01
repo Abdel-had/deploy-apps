@@ -116,6 +116,8 @@ services:
       - "--certificatesresolvers.mytlschallenge.acme.tlschallenge=true"
       - "--certificatesresolvers.mytlschallenge.acme.email=${SSL_EMAIL}"
       - "--certificatesresolvers.mytlschallenge.acme.storage=/letsencrypt/acme.json"
+      - "--entrypoints.websecure.transport.respondingTimeouts.readTimeout=1h"
+      - "--entrypoints.websecure.transport.respondingTimeouts.idleTimeout=1h"
     ports:
       - "80:80"
       - "443:443"
@@ -124,7 +126,7 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:ro
 
   n8n:
-    image: docker.n8n.io/n8nio/n8n:1.107.4-arm64
+    image: docker.n8n.io/n8nio/n8n:1.114.2
     restart: always
     ports:
       - "127.0.0.1:5678:5678"
@@ -152,9 +154,9 @@ services:
       - traefik.http.middlewares.n8n-ip.ipallowlist.sourcerange=0.0.0.0/0,::/0
       - traefik.http.routers.n8n.middlewares=n8n-headers@docker,n8n-rate@docker,n8n-body@docker,n8n-ip@docker
     environment:
+      - DB_SQLITE_POOL_SIZE=1
       - N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS=true
       - N8N_ENCRYPTION_KEY=<32+ chars aléatoires>
-      - DB_SQLITE_POOL_SIZE=1
       - N8N_RUNNERS_ENABLED=true
       - N8N_HOST=${FQDN}
       - N8N_PORT=5678

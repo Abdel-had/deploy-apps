@@ -1,0 +1,86 @@
+services:
+  db:
+    image: mariadb:11
+    restart: always
+    command: --transaction-isolation=READ-COMMITTED --binlog-format=ROW
+    environment:
+      - MARIADB_ROOT_PASSWORD=${NC_DB_ROOT_PASSWORD}
+      - MARIADB_DATABASE=nextcloud
+      - MARIADB_USER=nextcloud
+      - MARIADB_PASSWORD=${NC_DB_PASSWORD}
+    volumes:
+      - nextcloud_db:/var/lib/mysql
+    networks:
+      - backend
+
+  redis:
+    image: redis:7-alpine
+    restart: always
+    command: redis-server --requirepass ${NC_REDIS_PASSWORD}
+    networks:
+      - backend
+
+  nextcloud:
+    image: nextcloud:apache
+    restart: always
+    depends_on:
+      - db
+      - redis
+    environment:
+      - NEXTCLOUD_TRUSTED_DOMAINS=${NEXTCLOUD_FQDN}
+      - NEXTCLOUD_DATA_DIR=/var/www/html/data
+      - MYSQL_DATABASE=nextcloud
+      - MYSQL_USER=nextcloud
+      - MYSQL_PASSWORD=${NC_DB_PASSWORD}
+      - MYSQL_HOST=db
+      - REDIS_HOST=redis
+      - REDIS_HOST_PASSWORD=${NC_REDIS_PASSWORD}
+      - PHP_MEMORY_LIMIT=512M
+      - PHP_UPLOAD_LIMIT=10G
+      # Overrides pour compatibilité mobile / WebDAV
+      - OVERWRITEHOST=${NEXTCLOUD_FQDN}
+      - OVERWRITEPROTOCOL=https
+      - OVERWRITECLIURL=https://${NEXTCLOUD_FQDN}
+    volumes:
+      - nextcloud_app:/var/www/html
+      - /mnt/cloud:/var/www/html/data
+    networks:
+      - backend
+      - traefik_proxy
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.nextcloud.rule=Host(`${NEXTCLOUD_FQDN}`)
+      - traefik.http.routers.nextcloud.entrypoints=websecure
+      - traefik.http.routers.nextcloud.tls=true
+      - traefik.http.routers.nextcloud.tls.certresolver=mytlschallenge
+      - traefik.http.services.nextcloud.loadbalancer.server.port=80
+
+      # Headers de durcissement
+      - traefik.http.middlewares.nextcloud-headers.headers.STSSeconds=31536000
+      - traefik.http.middlewares.nextcloud-headers.headers.forceSTSHeader=true
+      - traefik.http.middlewares.nextcloud-headers.headers.STSIncludeSubdomains=true
+      - traefik.http.middlewares.nextcloud-headers.headers.STSPreload=true
+      - traefik.http.middlewares.nextcloud-headers.headers.contentTypeNosniff=true
+      - traefik.http.middlewares.nextcloud-headers.headers.browserXSSFilter=true
+      - traefik.http.middlewares.nextcloud-headers.headers.referrerPolicy=no-referrer-when-downgrade
+
+      # Middleware pour gros uploads
+      - traefik.http.middlewares.nextcloud-body.buffering.maxRequestBodyBytes=0
+      - traefik.http.middlewares.nextcloud-body.buffering.memRequestBodyBytes=0
+
+      # Middleware WebDAV
+      - traefik.http.middlewares.nextcloud-webdav.headers.customrequestheaders.Depth=Infinity
+
+      # Association des middlewares
+      - traefik.http.routers.nextcloud.middlewares=nextcloud-headers@docker,nextcloud-body@docker,nextcloud-webdav@docker
+
+networks:
+  backend:
+    driver: bridge
+  traefik_proxy:
+    external: true
+    name: n8n-traefik_default
+
+volumes:
+  nextcloud_app:
+  nextcloud_db:
