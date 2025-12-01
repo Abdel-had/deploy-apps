@@ -166,7 +166,7 @@ services:
       - GENERIC_TIMEZONE=${GENERIC_TIMEZONE}
     volumes:
       - n8n_data:/home/node/.n8n
-      - /local-files:/files
+      - ./local-files:/files
 
 volumes:
   traefik_data:
